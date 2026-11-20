@@ -215,7 +215,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         TextButton(onClick = { if (selected < items.lastIndex) { checkpoint(); items = items.toMutableList().also { val v = it.removeAt(selected); it.add(selected + 1, v) }; selected++ } }, enabled = selected < items.lastIndex) { Text("Down") }
                     }
                 }
-                Row(Modifier.fillMaxSize().padding(horizontal = 4.dp, vertical = 4.dp)) {
+                Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
                     Column(Modifier.width(48.dp).fillMaxHeight().background(Color(0xFF20242D)), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Tool.entries.forEach { t ->
                             val activeTool = tool == t
@@ -229,11 +229,15 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         Canvas(Modifier.fillMaxSize()
                             .pointerInput(zoom, pan, tool, items, selected) {
                                 detectTransformGestures { centroid, panChange, zoomChange, _ ->
-                                    val oldZoom = zoom
-                                    val nextZoom = (oldZoom * zoomChange).coerceIn(.25f, 8f)
-                                    val scale = nextZoom / oldZoom
-                                    pan = centroid - (centroid - pan) * scale + panChange
-                                    zoom = nextZoom
+                                    // Single-finger movement is owned by the selection/drawing drag handler.
+                                    // This handler only owns pinch gestures, avoiding competing one-finger pans.
+                                    if (kotlin.math.abs(zoomChange - 1f) > 0.001f) {
+                                        val oldZoom = zoom
+                                        val nextZoom = (oldZoom * zoomChange).coerceIn(.25f, 8f)
+                                        val scale = nextZoom / oldZoom
+                                        pan = centroid - (centroid - pan) * scale + panChange
+                                        zoom = nextZoom
+                                    }
                                 }
                             }
                             .pointerInput(tool, zoom, pan, items, selected) {
@@ -302,13 +306,25 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         }
                         if (items.isEmpty()) Text("Choose a tool and draw", Modifier.align(Alignment.Center), color = Color.LightGray)
                     }
-                    if (showLayers) {
-                        LazyColumn(Modifier.width(104.dp).fillMaxHeight().background(Color(0xFF20242D)).padding(2.dp)) {
-                            item { Text("OBJECTS", Modifier.padding(6.dp), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9EA8BE)) }
-                            itemsIndexed(items.reversed()) { reverseIndex, item ->
-                                val index = items.lastIndex - reverseIndex
-                                TextButton(onClick = { selected = index }, modifier = Modifier.fillMaxWidth()) {
-                                    Text("${if (selected == index) "● " else ""}${item.type} ${index + 1}", fontSize = 10.sp)
+
+                }
+                if (showLayers) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 156.dp),
+                        color = Color(0xFF20242D),
+                        tonalElevation = 4.dp
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("OBJECTS / LAYERS", Modifier.weight(1f), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9EA8BE))
+                                TextButton(onClick = { showLayers = false }) { Text("Close") }
+                            }
+                            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 112.dp)) {
+                                itemsIndexed(items.reversed()) { reverseIndex, item ->
+                                    val index = items.lastIndex - reverseIndex
+                                    TextButton(onClick = { selected = index }, modifier = Modifier.fillMaxWidth().heightIn(min = 36.dp)) {
+                                        Text("${if (selected == index) "● " else ""}${item.name.ifBlank { item.type }} · ${item.type}", fontSize = 11.sp)
+                                    }
                                 }
                             }
                         }
