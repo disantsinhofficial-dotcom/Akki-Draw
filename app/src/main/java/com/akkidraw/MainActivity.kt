@@ -213,15 +213,6 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                                 }
                             }
                             .pointerInput(tool, zoom, pan, items, selected) {
-                                detectTapGestures { p ->
-                                    if (tool == Tool.SELECT) {
-                                        val doc = (p - pan) / zoom
-                                        selected = items.indexOfLast { it.visible && hitTest(it, doc) }
-                                        status = if (selected >= 0) "Object selected" else "Canvas"
-                                    }
-                                }
-                            }
-                            .pointerInput(tool, zoom, pan, items, selected) {
                                 detectDragGestures(
                                     onDragStart = { p ->
                                         val doc = (p - pan) / zoom
