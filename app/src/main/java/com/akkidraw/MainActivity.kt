@@ -47,13 +47,17 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-private enum class Tool { SELECT, DRAW, RECT, ELLIPSE, LINE }
+private enum class Tool { SELECT, NODE, PEN, DRAW, RECT, ELLIPSE, LINE }
 private data class Item(
     val type: String,
     val points: List<Offset>,
     val color: Long = 0xFF2563EB,
     val stroke: Float = 4f,
-    val bitmap: Bitmap? = null
+    val bitmap: Bitmap? = null,
+    val fillColor: Long? = null,
+    val visible: Boolean = true,
+    val locked: Boolean = false,
+    val name: String = type
 ) {
     fun moved(delta: Offset) = copy(points = points.map { it + delta })
 }
@@ -79,6 +83,9 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
     var future by remember { mutableStateOf(listOf<Snapshot>()) }
     var status by remember { mutableStateOf("Ready · SVG editable objects · PDF page import") }
     var showLayers by remember { mutableStateOf(false) }
+    var activeNode by remember { mutableIntStateOf(-1) }
+    var showStyle by remember { mutableStateOf(false) }
+    var pngLauncherState by remember { mutableStateOf(false) }
 
     fun checkpoint() {
         history = history + Snapshot(items, selected)
@@ -108,6 +115,10 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
         if (uri != null) runCatching { resolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(exportSvg(items)) }; status = "SVG exported" }
             .onFailure { status = "SVG export failed" }
     }
+    val pngLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
+        if (uri != null) runCatching { exportPng(items, uri, resolver); status = "PNG exported" }
+            .onFailure { status = "PNG export failed: ${it.message}" }
+    }
     val pdfLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         if (uri != null) runCatching { exportPdf(items, uri, resolver); status = "PDF exported" }
             .onFailure { status = "PDF export failed: ${it.message}" }
@@ -136,7 +147,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
             TopAppBar(title = {
                 Column {
                     Text("Akki Draw", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    Text("Vector studio · Phase 2 + 3", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Vector studio · Advanced editing + Export", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }, actions = {
                 TextButton(onClick = { showLayers = !showLayers }) { Text("Layers") }
@@ -146,13 +157,14 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                 Column {
                     Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 4.dp, vertical = 5.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly) {
-                        Tool.entries.forEach { t -> TextButton(onClick = { tool = t }) { Text(if (tool == t) "● ${t.name}" else t.name) } }
+                        Tool.entries.forEach { t -> TextButton(onClick = { tool = t }) { Text(if (tool == t) "● ${t.name}" else t.name, fontSize = 10.sp) } }
                     }
                     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                         TextButton(onClick = { undo() }, enabled = history.isNotEmpty()) { Text("Undo") }
                         TextButton(onClick = { redo() }, enabled = future.isNotEmpty()) { Text("Redo") }
                         TextButton(onClick = { if (selected in items.indices) { checkpoint(); items = items.toMutableList().also { it.removeAt(selected) }; selected = -1 } }) { Text("Delete") }
                         TextButton(onClick = { saveLauncher.launch("AkkiDraw-project.json") }) { Text("Save") }
+                        TextButton(onClick = { showStyle = !showStyle }, enabled = selected in items.indices) { Text("Style") }
                     }
                 }
             }
@@ -168,6 +180,23 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                     TextButton(onClick = { openLauncher.launch(arrayOf("image/svg+xml", "application/pdf", "application/json", "text/*")) }) { Text("Open SVG/PDF/Project") }
                     TextButton(onClick = { svgLauncher.launch("AkkiDraw.svg") }) { Text("Export SVG") }
                     TextButton(onClick = { pdfLauncher.launch("AkkiDraw.pdf") }) { Text("Export PDF") }
+                    TextButton(onClick = { pngLauncher.launch("AkkiDraw.png") }) { Text("PNG") }
+                }
+                if (showStyle && selected in items.indices) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        listOf(0xFF2563EB, 0xFFDC2626, 0xFF16A34A, 0xFF111827, 0xFFF59E0B).forEach { swatch ->
+                            TextButton(onClick = { checkpoint(); items = items.toMutableList().also { it[selected] = it[selected].copy(color = swatch, fillColor = swatch) } }) { Text("●", color = Color(swatch)) }
+                        }
+                        TextButton(onClick = { checkpoint(); items = items.toMutableList().also { it[selected] = it[selected].copy(fillColor = null) } }) { Text("No fill") }
+                    }
+                }
+                if (selected in items.indices) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        TextButton(onClick = { checkpoint(); items = items.toMutableList().also { it[selected] = it[selected].copy(visible = !it[selected].visible) } }) { Text(if (items[selected].visible) "Hide" else "Show") }
+                        TextButton(onClick = { checkpoint(); items = items.toMutableList().also { it[selected] = it[selected].copy(locked = !it[selected].locked) } }) { Text(if (items[selected].locked) "Unlock" else "Lock") }
+                        TextButton(onClick = { if (selected > 0) { checkpoint(); items = items.toMutableList().also { val v = it.removeAt(selected); it.add(selected - 1, v) }; selected-- } }, enabled = selected > 0) { Text("Up") }
+                        TextButton(onClick = { if (selected < items.lastIndex) { checkpoint(); items = items.toMutableList().also { val v = it.removeAt(selected); it.add(selected + 1, v) }; selected++ } }, enabled = selected < items.lastIndex) { Text("Down") }
+                    }
                 }
                 Row(Modifier.fillMaxSize().padding(10.dp)) {
                     Box(Modifier.weight(1f).fillMaxHeight().background(Color.White)) {
@@ -184,7 +213,14 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                                     onDragStart = { p ->
                                         val doc = (p - pan) / zoom
                                         when (tool) {
-                                            Tool.DRAW, Tool.LINE, Tool.RECT, Tool.ELLIPSE -> active = listOf(doc)
+                                            Tool.DRAW, Tool.PEN, Tool.LINE, Tool.RECT, Tool.ELLIPSE -> active = listOf(doc)
+                                            Tool.NODE -> {
+                                                if (selected in items.indices && !items[selected].locked) {
+                                                    val pts = items[selected].points
+                                                    activeNode = pts.indices.minByOrNull { (pts[it] - doc).getDistance() } ?: -1
+                                                    if (activeNode >= 0 && (pts[activeNode] - doc).getDistance() < 32f) checkpoint() else activeNode = -1
+                                                }
+                                            }
                                             Tool.SELECT -> {
                                                 val hit = items.indexOfLast { hitTest(it, doc) }
                                                 selected = hit
@@ -194,7 +230,11 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                                     onDrag = { change, delta ->
                                         val docDelta = delta / zoom
                                         when (tool) {
-                                            Tool.DRAW, Tool.LINE, Tool.RECT, Tool.ELLIPSE -> active = active + ((change.position - pan) / zoom)
+                                            Tool.DRAW, Tool.PEN, Tool.LINE, Tool.RECT, Tool.ELLIPSE -> active = active + ((change.position - pan) / zoom)
+                                            Tool.NODE -> if (selected in items.indices && activeNode in items[selected].points.indices) {
+                                                val old = items[selected]
+                                                items = items.toMutableList().also { list -> list[selected] = old.copy(points = old.points.toMutableList().also { it[activeNode] = it[activeNode] + docDelta }) }
+                                            }
                                             Tool.SELECT -> if (selected in items.indices) {
                                                 checkpoint()
                                                 items = items.toMutableList().also { it[selected] = it[selected].moved(docDelta) }
@@ -205,11 +245,12 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                                     onDragEnd = {
                                         if (active.size > 1) {
                                             checkpoint()
-                                            val type = when (tool) { Tool.DRAW -> "freehand"; Tool.RECT -> "rect"; Tool.ELLIPSE -> "ellipse"; Tool.LINE -> "line"; else -> "freehand" }
+                                            val type = when (tool) { Tool.DRAW -> "freehand"; Tool.PEN -> "pen"; Tool.RECT -> "rect"; Tool.ELLIPSE -> "ellipse"; Tool.LINE -> "line"; else -> "freehand" }
                                             items = items + Item(type, active)
                                             selected = items.lastIndex
                                         }
                                         active = emptyList()
+                                        activeNode = -1
                                     }
                                 )
                             }
@@ -272,7 +313,7 @@ private fun hitTest(item: Item, p: Offset): Boolean {
 }
 private fun encodeProject(items: List<Item>): String = JSONObject().put("version", 2).put("items", JSONArray().apply {
     items.forEach { item ->
-        put(JSONObject().put("type", item.type).put("color", item.color).put("stroke", item.stroke).put("points", JSONArray().apply {
+        put(JSONObject().put("type", item.type).put("name", item.name).put("color", item.color).put("fillColor", item.fillColor ?: JSONObject.NULL).put("visible", item.visible).put("locked", item.locked).put("stroke", item.stroke).put("points", JSONArray().apply {
             item.points.forEach { put(JSONArray().put(it.x).put(it.y)) }
         }))
     }
@@ -282,7 +323,7 @@ private fun decodeProject(json: String): List<Item> {
     return (0 until arr.length()).map { i ->
         val o = arr.getJSONObject(i); val pts = o.getJSONArray("points")
         Item(o.getString("type"), (0 until pts.length()).map { j -> val xy = pts.getJSONArray(j); Offset(xy.getDouble(0).toFloat(), xy.getDouble(1).toFloat()) },
-            o.optLong("color", 0xFF2563EB), o.optDouble("stroke", 4.0).toFloat())
+            o.optLong("color", 0xFF2563EB), o.optDouble("stroke", 4.0).toFloat(), fillColor = if (o.isNull("fillColor")) null else o.optLong("fillColor"), visible = o.optBoolean("visible", true), locked = o.optBoolean("locked", false), name = o.optString("name", o.optString("type", "Layer")))
     }
 }
 private fun exportSvg(items: List<Item>): String {
@@ -339,7 +380,7 @@ private fun importSvg(svg: String): List<Item> {
 private fun exportPdf(items: List<Item>, uri: Uri, resolver: ContentResolver) {
     val doc = PdfDocument(); val info = PdfDocument.PageInfo.Builder(1200, 1200, 1).create()
     val page = doc.startPage(info); val canvas = page.canvas
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.BLUE; style = Paint.Style.STROKE; strokeWidth = 4f }
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     items.forEach { item ->
         val p=item.points
         if (p.size >= 2) {
@@ -354,6 +395,42 @@ private fun exportPdf(items: List<Item>, uri: Uri, resolver: ContentResolver) {
     }
     doc.finishPage(page); resolver.openOutputStream(uri)?.use { doc.writeTo(it) }; doc.close()
 }
+private fun exportPng(items: List<Item>, uri: Uri, resolver: ContentResolver) {
+    val bitmap = Bitmap.createBitmap(1200, 1200, Bitmap.Config.ARGB_8888)
+    val canvas = NativeCanvas(bitmap)
+    canvas.drawColor(android.graphics.Color.WHITE)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    items.filter { it.visible }.forEach { item ->
+        val points = item.points
+        if (item.type == "bitmap" && item.bitmap != null) {
+            canvas.drawBitmap(item.bitmap, points.firstOrNull()?.x ?: 0f, points.firstOrNull()?.y ?: 0f, null)
+        } else if (points.size >= 2) {
+            val color = item.color
+            paint.color = android.graphics.Color.argb(((color ushr 24) and 0xFF).toInt(), ((color ushr 16) and 0xFF).toInt(), ((color ushr 8) and 0xFF).toInt(), (color and 0xFF).toInt())
+            paint.strokeWidth = item.stroke
+            val l = points.minOf { it.x }; val t = points.minOf { it.y }
+            val w = max(1f, points.maxOf { it.x } - l); val h = max(1f, points.maxOf { it.y } - t)
+            if (item.fillColor != null) {
+                paint.style = Paint.Style.FILL
+                val fc = item.fillColor
+                paint.color = android.graphics.Color.argb(((fc ushr 24) and 0xFF).toInt(), ((fc ushr 16) and 0xFF).toInt(), ((fc ushr 8) and 0xFF).toInt(), (fc and 0xFF).toInt())
+                if (item.type == "rect") canvas.drawRect(l, t, l + w, t + h, paint)
+                if (item.type == "ellipse") canvas.drawOval(l, t, l + w, t + h, paint)
+                paint.style = Paint.Style.STROKE
+                paint.color = android.graphics.Color.argb(((color ushr 24) and 0xFF).toInt(), ((color ushr 16) and 0xFF).toInt(), ((color ushr 8) and 0xFF).toInt(), (color and 0xFF).toInt())
+            }
+            when (item.type) {
+                "rect" -> canvas.drawRect(l, t, l + w, t + h, paint)
+                "ellipse" -> canvas.drawOval(l, t, l + w, t + h, paint)
+                "line" -> canvas.drawLine(points.first().x, points.first().y, points.last().x, points.last().y, paint)
+                else -> { val path = NativePath(); path.moveTo(points.first().x, points.first().y); points.drop(1).forEach { path.lineTo(it.x, it.y) }; canvas.drawPath(path, paint) }
+            }
+        }
+    }
+    resolver.openOutputStream(uri)?.use { stream -> if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) error("PNG encoding failed") }
+    bitmap.recycle()
+}
+
 private fun importPdfPage(uri: Uri, resolver: ContentResolver): Item {
     val pfd = resolver.openFileDescriptor(uri, "r") ?: error("Cannot open PDF")
     val renderer = PdfRenderer(pfd)
