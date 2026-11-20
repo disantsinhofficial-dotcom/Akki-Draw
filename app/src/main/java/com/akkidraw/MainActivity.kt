@@ -142,7 +142,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
         }.onFailure { status = "Open failed: ${it.message ?: "Invalid file"}" }
     }
 
-    MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF3157D5), background = Color(0xFFF3F5F9))) {
+    MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF8B9CFF), secondary = Color(0xFF63D6C5), background = Color(0xFF111318), surface = Color(0xFF1B1E25))) {
         Scaffold(topBar = {
             TopAppBar(title = {
                 Column {
@@ -169,9 +169,9 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                 }
             }
         }) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding).background(Color(0xFFF3F5F9))) {
+            Column(Modifier.fillMaxSize().padding(padding).background(Color(0xFF111318))) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(status, Modifier.weight(1f), fontSize = 11.sp, color = Color.DarkGray, maxLines = 1)
+                    Text(status, Modifier.weight(1f), fontSize = 11.sp, color = Color(0xFFB8C0D4), maxLines = 1)
                     TextButton(onClick = { zoom = (zoom / 1.25f).coerceIn(.25f, 8f) }) { Text("−") }
                     Text("${(zoom * 100).toInt()}%", fontSize = 12.sp)
                     TextButton(onClick = { zoom = (zoom * 1.25f).coerceIn(.25f, 8f) }) { Text("+") }
@@ -270,7 +270,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         if (items.isEmpty()) Text("Choose a tool and draw", Modifier.align(Alignment.Center), color = Color.LightGray)
                     }
                     if (showLayers) {
-                        LazyColumn(Modifier.width(112.dp).fillMaxHeight().background(Color(0xFFF0F2F6)).padding(4.dp)) {
+                        LazyColumn(Modifier.width(112.dp).fillMaxHeight().background(Color(0xFF20242D)).padding(4.dp)) {
                             itemsIndexed(items.reversed()) { reverseIndex, item ->
                                 val index = items.lastIndex - reverseIndex
                                 TextButton(onClick = { selected = index }, modifier = Modifier.fillMaxWidth()) {
