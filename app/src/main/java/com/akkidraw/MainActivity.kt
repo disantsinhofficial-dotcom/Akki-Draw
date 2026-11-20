@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -86,6 +87,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
     var activeNode by remember { mutableIntStateOf(-1) }
     var showStyle by remember { mutableStateOf(false) }
     var pngLauncherState by remember { mutableStateOf(false) }
+    var draggingCanvas by remember { mutableStateOf(false) }
 
     fun checkpoint() {
         history = history + Snapshot(items, selected)
@@ -203,9 +205,20 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         Canvas(Modifier.fillMaxSize()
                             .pointerInput(zoom, pan, tool, items, selected) {
                                 detectTransformGestures { centroid, panChange, zoomChange, _ ->
-                                    val next = (zoom * zoomChange).coerceIn(.25f, 8f)
-                                    pan += panChange
-                                    zoom = next
+                                    val oldZoom = zoom
+                                    val nextZoom = (oldZoom * zoomChange).coerceIn(.25f, 8f)
+                                    val scale = nextZoom / oldZoom
+                                    pan = centroid - (centroid - pan) * scale + panChange
+                                    zoom = nextZoom
+                                }
+                            }
+                            .pointerInput(tool, zoom, pan, items, selected) {
+                                detectTapGestures { p ->
+                                    if (tool == Tool.SELECT) {
+                                        val doc = (p - pan) / zoom
+                                        selected = items.indexOfLast { it.visible && hitTest(it, doc) }
+                                        status = if (selected >= 0) "Object selected" else "Canvas"
+                                    }
                                 }
                             }
                             .pointerInput(tool, zoom, pan, items, selected) {
@@ -222,8 +235,10 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                                                 }
                                             }
                                             Tool.SELECT -> {
-                                                val hit = items.indexOfLast { hitTest(it, doc) }
+                                                val hit = items.indexOfLast { it.visible && hitTest(it, doc) }
                                                 selected = hit
+                                                draggingCanvas = hit < 0
+                                                if (hit >= 0 && !items[hit].locked) checkpoint()
                                             }
                                         }
                                     },
@@ -235,22 +250,25 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                                                 val old = items[selected]
                                                 items = items.toMutableList().also { list -> list[selected] = old.copy(points = old.points.toMutableList().also { it[activeNode] = it[activeNode] + docDelta }) }
                                             }
-                                            Tool.SELECT -> if (selected in items.indices) {
-                                                checkpoint()
-                                                items = items.toMutableList().also { it[selected] = it[selected].moved(docDelta) }
+                                            Tool.SELECT -> {
+                                                if (draggingCanvas) pan += delta
+                                                else if (selected in items.indices && !items[selected].locked) {
+                                                    items = items.toMutableList().also { it[selected] = it[selected].moved(docDelta) }
+                                                }
                                             }
                                         }
                                         change.consume()
                                     },
                                     onDragEnd = {
                                         if (active.size > 1) {
-                                            checkpoint()
                                             val type = when (tool) { Tool.DRAW -> "freehand"; Tool.PEN -> "pen"; Tool.RECT -> "rect"; Tool.ELLIPSE -> "ellipse"; Tool.LINE -> "line"; else -> "freehand" }
+                                            checkpoint()
                                             items = items + Item(type, active)
                                             selected = items.lastIndex
                                         }
                                         active = emptyList()
                                         activeNode = -1
+                                        draggingCanvas = false
                                     }
                                 )
                             }
@@ -306,9 +324,12 @@ private fun DrawScope.drawItem(item: Item, color: Color) {
     }
 }
 private fun hitTest(item: Item, p: Offset): Boolean {
-    if (item.points.isEmpty()) return false
-    val l = item.points.minOf { it.x } - 18; val r = item.points.maxOf { it.x } + 18
-    val t = item.points.minOf { it.y } - 18; val b = item.points.maxOf { it.y } + 18
+    if (item.points.isEmpty() || !item.visible) return false
+    val tolerance = 18f
+    val l = item.points.minOf { it.x } - tolerance
+    val r = item.points.maxOf { it.x } + tolerance
+    val t = item.points.minOf { it.y } - tolerance
+    val b = item.points.maxOf { it.y } + tolerance
     return p.x in l..r && p.y in t..b
 }
 private fun encodeProject(items: List<Item>): String = JSONObject().put("version", 2).put("items", JSONArray().apply {
