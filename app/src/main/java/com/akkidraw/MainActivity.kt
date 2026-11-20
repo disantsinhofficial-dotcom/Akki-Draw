@@ -18,6 +18,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -26,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -88,6 +91,9 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
     var showStyle by remember { mutableStateOf(false) }
     var pngLauncherState by remember { mutableStateOf(false) }
     var draggingCanvas by remember { mutableStateOf(false) }
+    val appContext = LocalContext.current
+    val setupPrefs = remember { appContext.getSharedPreferences("akki_draw_setup", android.content.Context.MODE_PRIVATE) }
+    var showSetup by remember { mutableStateOf(!setupPrefs.getBoolean("completed", false)) }
 
     fun checkpoint() {
         history = history + Snapshot(items, selected)
@@ -144,6 +150,27 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
         }.onFailure { status = "Open failed: ${it.message ?: "Invalid file"}" }
     }
 
+    if (showSetup) {
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Welcome to Akki Draw") },
+            text = { Text("Akki Draw needs access only to the files you choose. Android's file picker grants access to the selected SVG, PDF or project file; no broad storage permission is required.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    setupPrefs.edit().putBoolean("completed", true).apply()
+                    showSetup = false
+                }) { Text("Continue") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    openLauncher.launch(arrayOf("image/svg+xml", "application/pdf", "application/json"))
+                    setupPrefs.edit().putBoolean("completed", true).apply()
+                    showSetup = false
+                }) { Text("Import a file") }
+            }
+        )
+    }
+
     MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF8B9CFF), secondary = Color(0xFF63D6C5), background = Color(0xFF111318), surface = Color(0xFF1B1E25))) {
         Scaffold(topBar = {
             TopAppBar(title = {
@@ -166,7 +193,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                     Text("${(zoom * 100).toInt()}%", fontSize = 12.sp)
                     TextButton(onClick = { zoom = (zoom * 1.25f).coerceIn(.25f, 8f) }) { Text("+") }
                 }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Start) {
                     TextButton(onClick = { openLauncher.launch(arrayOf("image/svg+xml", "application/pdf", "application/json", "text/*")) }) { Text("Open SVG/PDF/Project") }
                     TextButton(onClick = { svgLauncher.launch("AkkiDraw.svg") }) { Text("Export SVG") }
                     TextButton(onClick = { pdfLauncher.launch("AkkiDraw.pdf") }) { Text("Export PDF") }
@@ -188,8 +215,8 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         TextButton(onClick = { if (selected < items.lastIndex) { checkpoint(); items = items.toMutableList().also { val v = it.removeAt(selected); it.add(selected + 1, v) }; selected++ } }, enabled = selected < items.lastIndex) { Text("Down") }
                     }
                 }
-                Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp)) {
-                    Column(Modifier.width(58.dp).fillMaxHeight().background(Color(0xFF20242D)), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(Modifier.fillMaxSize().padding(horizontal = 4.dp, vertical = 4.dp)) {
+                    Column(Modifier.width(48.dp).fillMaxHeight().background(Color(0xFF20242D)), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Tool.entries.forEach { t ->
                             val activeTool = tool == t
                             TextButton(onClick = { tool = t }, modifier = Modifier.fillMaxWidth().height(48.dp), contentPadding = PaddingValues(2.dp)) {
@@ -264,7 +291,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                             drawContext.transform.translate(pan.x, pan.y)
                             drawContext.transform.scale(zoom, zoom, Offset.Zero)
                             items.forEachIndexed { index, item ->
-                                drawItem(item, if (index == selected) Color(0xFFEF4444) else Color(item.color))
+                                if (item.visible) drawItem(item, if (index == selected) Color(0xFFEF4444) else Color(item.color))
                             }
                             if (active.size > 1) {
                                 val preview = Item(when (tool) { Tool.RECT -> "rect"; Tool.ELLIPSE -> "ellipse"; Tool.LINE -> "line"; else -> "freehand" }, active)
@@ -276,7 +303,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         if (items.isEmpty()) Text("Choose a tool and draw", Modifier.align(Alignment.Center), color = Color.LightGray)
                     }
                     if (showLayers) {
-                        LazyColumn(Modifier.width(132.dp).fillMaxHeight().background(Color(0xFF20242D)).padding(4.dp)) {
+                        LazyColumn(Modifier.width(104.dp).fillMaxHeight().background(Color(0xFF20242D)).padding(2.dp)) {
                             item { Text("OBJECTS", Modifier.padding(6.dp), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9EA8BE)) }
                             itemsIndexed(items.reversed()) { reverseIndex, item ->
                                 val index = items.lastIndex - reverseIndex
@@ -313,7 +340,7 @@ private fun DrawScope.drawItem(item: Item, color: Color) {
     }
 }
 private fun hitTest(item: Item, p: Offset): Boolean {
-    if (item.points.isEmpty() || !item.visible) return false
+    if (item.points.isEmpty() || !item.visible || item.locked) return false
     val tolerance = 18f
     val l = item.points.minOf { it.x } - tolerance
     val r = item.points.maxOf { it.x } + tolerance
@@ -391,10 +418,12 @@ private fun exportPdf(items: List<Item>, uri: Uri, resolver: ContentResolver) {
     val doc = PdfDocument(); val info = PdfDocument.PageInfo.Builder(1200, 1200, 1).create()
     val page = doc.startPage(info); val canvas = page.canvas
     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    items.forEach { item ->
+    items.filter { it.visible }.forEach { item ->
         val p=item.points
         if (p.size >= 2) {
             val l=p.minOf { it.x }; val t=p.minOf { it.y }; val w=max(1f,p.maxOf { it.x }-l); val h=max(1f,p.maxOf { it.y }-t)
+            paint.color = android.graphics.Color.argb(((item.color ushr 24) and 0xFF).toInt(), ((item.color ushr 16) and 0xFF).toInt(), ((item.color ushr 8) and 0xFF).toInt(), (item.color and 0xFF).toInt())
+            paint.strokeWidth = item.stroke
             when(item.type) {
                 "rect" -> canvas.drawRect(l,t,l+w,t+h,paint)
                 "ellipse" -> canvas.drawOval(l,t,l+w,t+h,paint)
