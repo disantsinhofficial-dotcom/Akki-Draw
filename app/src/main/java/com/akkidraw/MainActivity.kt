@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Path as NativePath
 import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
+import com.caverock.androidsvg.SVG
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
@@ -113,12 +114,21 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
     }
     val openLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) runCatching {
-            val name = resolver.getType(uri).orEmpty()
-            val loaded = if (name.contains("svg") || uri.toString().endsWith(".svg", true)) importSvg(resolver.openInputStream(uri)!!.bufferedReader().readText())
-            else if (name.contains("pdf") || uri.toString().endsWith(".pdf", true)) listOf(importPdfPage(uri, resolver))
-            else decodeProject(resolver.openInputStream(uri)!!.bufferedReader().readText())
-            checkpoint(); items = loaded; selected = -1; status = "Imported ${loaded.size} object(s)"
-        }.onFailure { status = "Open failed: ${it.message}" }
+            val mime = resolver.getType(uri).orEmpty().lowercase()
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Could not read selected file")
+            val prefix = bytes.take(512).toByteArray().toString(Charsets.UTF_8).trimStart('\uFEFF', ' ', '\n', '\r', '\t')
+            val loaded = when {
+                mime.contains("pdf") || prefix.startsWith("%PDF") -> listOf(importPdfPage(uri, resolver))
+                mime.contains("svg") || prefix.contains("<svg", ignoreCase = true) -> importSvg(bytes.toString(Charsets.UTF_8))
+                mime.contains("json") || prefix.startsWith("{") -> decodeProject(bytes.toString(Charsets.UTF_8))
+                else -> error("Unsupported file. Please select SVG, PDF or Akki Draw JSON.")
+            }
+            require(loaded.isNotEmpty()) { "No drawable content found in this file" }
+            checkpoint()
+            items = loaded
+            selected = -1
+            status = "Imported ${loaded.size} object(s)"
+        }.onFailure { status = "Open failed: ${it.message ?: "Invalid file"}" }
     }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF3157D5), background = Color(0xFFF3F5F9))) {
@@ -314,6 +324,15 @@ private fun importSvg(svg: String): List<Item> {
         val pts = Regex("""(-?[0-9.]+),(-?[0-9.]+)""").findAll(m.groupValues[1])
             .map { Offset(it.groupValues[1].toFloat(), it.groupValues[2].toFloat()) }.toList()
         if (pts.size > 1) out += Item("freehand", pts)
+    }
+    if (out.isEmpty()) {
+        val document = SVG.getFromString(svg)
+        val picture = document.renderToPicture(1200, 1200)
+        val bitmap = Bitmap.createBitmap(1200, 1200, Bitmap.Config.ARGB_8888)
+        val canvas = NativeCanvas(bitmap)
+        canvas.drawColor(android.graphics.Color.WHITE)
+        canvas.drawPicture(picture)
+        out += Item("bitmap", listOf(Offset.Zero), bitmap = bitmap)
     }
     return out
 }
