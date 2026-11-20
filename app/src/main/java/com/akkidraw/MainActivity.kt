@@ -312,9 +312,35 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                             drawContext.transform.scale(1f / zoom, 1f / zoom, Offset.Zero)
                             drawContext.transform.translate(-pan.x, -pan.y)
                         }
-                        if (items.isEmpty()) Text("Choose a tool and draw", Modifier.align(Alignment.Center), color = Color.LightGray)
+                        if (items.isEmpty()) Text("DRAWING PAGE · Choose a tool to start", Modifier.align(Alignment.Center), color = Color.Gray)
                     }
-
+                    Spacer(Modifier.width(6.dp))
+                    Column(Modifier.width(136.dp).fillMaxHeight().background(Color(0xFF20242D)).padding(5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("PROPERTIES", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFD7DDF0))
+                        Divider(color = Color(0xFF414755))
+                        Text(if (selected in items.indices) items[selected].name else "No selection", fontSize = 10.sp, color = Color(0xFF9EA8BE), maxLines = 1)
+                        TextButton(onClick = { showStyle = !showStyle }, modifier = Modifier.fillMaxWidth()) { Text("Fill / Outline") }
+                        if (selected in items.indices) {
+                            TextButton(onClick = { checkpoint(); items = items.toMutableList().also { it[selected] = it[selected].copy(visible = !it[selected].visible) } }, modifier = Modifier.fillMaxWidth()) { Text(if (items[selected].visible) "Hide" else "Show") }
+                            TextButton(onClick = { checkpoint(); items = items.toMutableList().also { it[selected] = it[selected].copy(locked = !it[selected].locked) } }, modifier = Modifier.fillMaxWidth()) { Text(if (items[selected].locked) "Unlock" else "Lock") }
+                            TextButton(onClick = { checkpoint(); items = items.toMutableList().also { it.removeAt(selected) }; selected = -1 }, modifier = Modifier.fillMaxWidth()) { Text("Delete") }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Text("ZOOM", fontSize = 10.sp, color = Color(0xFF9EA8BE))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { zoom = (zoom / 1.2f).coerceIn(.25f, 8f) }) { Text("−") }
+                            Text("${(zoom * 100).toInt()}%", fontSize = 10.sp)
+                            TextButton(onClick = { zoom = (zoom * 1.2f).coerceIn(.25f, 8f) }) { Text("+") }
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth().height(40.dp).background(Color(0xFF20242D)), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    listOf(0xFF111827, 0xFFEF4444, 0xFFF59E0B, 0xFF16A34A, 0xFF2563EB, 0xFF8B5CF6, 0xFFFFFFFF).forEach { swatch ->
+                        TextButton(onClick = { if (selected in items.indices) { checkpoint(); items = items.toMutableList().also { it[selected] = it[selected].copy(color = swatch, fillColor = swatch) } } }, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(32.dp)) { Text("●", fontSize = 22.sp, color = Color(swatch)) }
+                    }
+                    TextButton(onClick = { openLauncher.launch(arrayOf("*/*")) }) { Text("Import") }
+                    TextButton(onClick = { svgLauncher.launch("AkkiDraw.svg") }) { Text("SVG") }
+                    TextButton(onClick = { pngLauncher.launch("AkkiDraw.png") }) { Text("PNG") }
                 }
                 if (showLayers) {
                     Surface(
