@@ -293,19 +293,26 @@ private fun exportSvg(items: List<Item>): String {
 }
 private fun importSvg(svg: String): List<Item> {
     val out = mutableListOf<Item>()
-    val rect = Regex("<rect[^>]*x=\"([\d.]+)\"[^>]*y=\"([\d.]+)\"[^>]*width=\"([\d.]+)\"[^>]*height=\"([\d.]+)\"[^>]*", RegexOption.IGNORE_CASE)
+    val rect = Regex("""<rect\b[^>]*\bx="([0-9.]+)"[^>]*\by="([0-9.]+)"[^>]*\bwidth="([0-9.]+)"[^>]*\bheight="([0-9.]+)"[^>]*/?>""", RegexOption.IGNORE_CASE)
     rect.findAll(svg).forEach { m ->
-        val x=m.groupValues[1].toFloat(); val y=m.groupValues[2].toFloat(); val w=m.groupValues[3].toFloat(); val h=m.groupValues[4].toFloat()
-        out += Item("rect", listOf(Offset(x,y), Offset(x+w,y+h)))
+        val x = m.groupValues[1].toFloat()
+        val y = m.groupValues[2].toFloat()
+        val w = m.groupValues[3].toFloat()
+        val h = m.groupValues[4].toFloat()
+        out += Item("rect", listOf(Offset(x, y), Offset(x + w, y + h)))
     }
-    val ellipse = Regex("<ellipse[^>]*cx=\"([\d.]+)\"[^>]*cy=\"([\d.]+)\"[^>]*rx=\"([\d.]+)\"[^>]*ry=\"([\d.]+)\"[^>]*", RegexOption.IGNORE_CASE)
+    val ellipse = Regex("""<ellipse\b[^>]*\bcx="([0-9.]+)"[^>]*\bcy="([0-9.]+)"[^>]*\brx="([0-9.]+)"[^>]*\bry="([0-9.]+)"[^>]*/?>""", RegexOption.IGNORE_CASE)
     ellipse.findAll(svg).forEach { m ->
-        val x=m.groupValues[1].toFloat(); val y=m.groupValues[2].toFloat(); val rx=m.groupValues[3].toFloat(); val ry=m.groupValues[4].toFloat()
-        out += Item("ellipse", listOf(Offset(x-rx,y-ry), Offset(x+rx,y+ry)))
+        val x = m.groupValues[1].toFloat()
+        val y = m.groupValues[2].toFloat()
+        val rx = m.groupValues[3].toFloat()
+        val ry = m.groupValues[4].toFloat()
+        out += Item("ellipse", listOf(Offset(x - rx, y - ry), Offset(x + rx, y + ry)))
     }
-    val poly = Regex("<polyline[^>]*points=\"([^\"]+)\"[^>]*", RegexOption.IGNORE_CASE)
+    val poly = Regex("""<polyline\b[^>]*\bpoints="([^"]+)"[^>]*/?>""", RegexOption.IGNORE_CASE)
     poly.findAll(svg).forEach { m ->
-        val pts = Regex("([\d.]+),([\d.]+)").findAll(m.groupValues[1]).map { Offset(it.groupValues[1].toFloat(),it.groupValues[2].toFloat()) }.toList()
+        val pts = Regex("""(-?[0-9.]+),(-?[0-9.]+)""").findAll(m.groupValues[1])
+            .map { Offset(it.groupValues[1].toFloat(), it.groupValues[2].toFloat()) }.toList()
         if (pts.size > 1) out += Item("freehand", pts)
     }
     return out
