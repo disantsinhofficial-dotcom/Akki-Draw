@@ -10,6 +10,7 @@ import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import com.caverock.androidsvg.SVG
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
@@ -134,13 +135,20 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
     val openLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) runCatching {
             val mime = resolver.getType(uri).orEmpty().lowercase()
-            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Could not read selected file")
-            val prefix = bytes.take(512).toByteArray().toString(Charsets.UTF_8).trimStart('\uFEFF', ' ', '\n', '\r', '\t')
+            val displayName = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else ""
+            }.orEmpty().lowercase()
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Android could not read the selected file")
+            val prefix = bytes.take(1024).toByteArray().toString(Charsets.UTF_8).trimStart('\uFEFF', ' ', '\n', '\r', '\t')
             val loaded = when {
-                mime.contains("pdf") || prefix.startsWith("%PDF") -> listOf(importPdfPage(uri, resolver))
-                mime.contains("svg") || prefix.contains("<svg", ignoreCase = true) -> importSvg(bytes.toString(Charsets.UTF_8))
-                mime.contains("json") || prefix.startsWith("{") -> decodeProject(bytes.toString(Charsets.UTF_8))
-                else -> error("Unsupported file. Please select SVG, PDF or Akki Draw JSON.")
+                mime.contains("pdf") || displayName.endsWith(".pdf") || prefix.startsWith("%PDF") -> listOf(importPdfPage(uri, resolver))
+                mime.contains("svg") || displayName.endsWith(".svg") || prefix.contains("<svg", ignoreCase = true) -> importSvg(bytes.toString(Charsets.UTF_8))
+                mime.contains("json") || displayName.endsWith(".json") || prefix.startsWith("{") -> decodeProject(bytes.toString(Charsets.UTF_8))
+                mime.startsWith("image/") || displayName.endsWith(".png") || displayName.endsWith(".jpg") || displayName.endsWith(".jpeg") || displayName.endsWith(".webp") -> {
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: error("Image format could not be decoded")
+                    listOf(Item("bitmap", listOf(Offset.Zero), bitmap = bitmap, name = displayName.ifBlank { "Imported image" }))
+                }
+                else -> error("Unsupported file: $displayName ($mime). Choose SVG, PDF, PNG, JPG or Akki Draw project.")
             }
             require(loaded.isNotEmpty()) { "No drawable content found in this file" }
             checkpoint()
@@ -163,7 +171,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
             },
             dismissButton = {
                 TextButton(onClick = {
-                    openLauncher.launch(arrayOf("image/svg+xml", "application/pdf", "application/json"))
+                    openLauncher.launch(arrayOf("*/*"))
                     setupPrefs.edit().putBoolean("completed", true).apply()
                     showSetup = false
                 }) { Text("Import a file") }
@@ -194,7 +202,7 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                     TextButton(onClick = { zoom = (zoom * 1.25f).coerceIn(.25f, 8f) }) { Text("+") }
                 }
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Start) {
-                    TextButton(onClick = { openLauncher.launch(arrayOf("image/svg+xml", "application/pdf", "application/json", "text/*")) }) { Text("Open SVG/PDF/Project") }
+                    TextButton(onClick = { openLauncher.launch(arrayOf("*/*")) }) { Text("Open SVG/PDF/Project") }
                     TextButton(onClick = { svgLauncher.launch("AkkiDraw.svg") }) { Text("Export SVG") }
                     TextButton(onClick = { pdfLauncher.launch("AkkiDraw.pdf") }) { Text("Export PDF") }
                     TextButton(onClick = { pngLauncher.launch("AkkiDraw.png") }) { Text("PNG") }
@@ -216,10 +224,10 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                     }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
-                    Column(Modifier.width(48.dp).fillMaxHeight().background(Color(0xFF20242D)), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Column(Modifier.width(64.dp).fillMaxHeight().background(Color(0xFF20242D)), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Tool.entries.forEach { t ->
                             val activeTool = tool == t
-                            TextButton(onClick = { tool = t }, modifier = Modifier.fillMaxWidth().height(48.dp), contentPadding = PaddingValues(2.dp)) {
+                            TextButton(onClick = { tool = t }, modifier = Modifier.fillMaxWidth().height(56.dp), contentPadding = PaddingValues(2.dp)) {
                                 Text((if (activeTool) "▣\\n" else "") + when(t) { Tool.SELECT -> "Pick"; Tool.NODE -> "Node"; Tool.PEN -> "Pen"; Tool.DRAW -> "Free"; Tool.RECT -> "Rect"; Tool.ELLIPSE -> "Oval"; Tool.LINE -> "Line" }, fontSize = 10.sp, lineHeight = 12.sp, color = if(activeTool) Color(0xFF8B9CFF) else Color(0xFFD7DDF0))
                             }
                         }
@@ -396,40 +404,16 @@ private fun exportSvg(items: List<Item>): String {
     return """<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">$body</svg>"""
 }
 private fun importSvg(svg: String): List<Item> {
-    val out = mutableListOf<Item>()
-    val rect = Regex("""<rect\b[^>]*\bx="([0-9.]+)"[^>]*\by="([0-9.]+)"[^>]*\bwidth="([0-9.]+)"[^>]*\bheight="([0-9.]+)"[^>]*/?>""", RegexOption.IGNORE_CASE)
-    rect.findAll(svg).forEach { m ->
-        val x = m.groupValues[1].toFloat()
-        val y = m.groupValues[2].toFloat()
-        val w = m.groupValues[3].toFloat()
-        val h = m.groupValues[4].toFloat()
-        out += Item("rect", listOf(Offset(x, y), Offset(x + w, y + h)))
-    }
-    val ellipse = Regex("""<ellipse\b[^>]*\bcx="([0-9.]+)"[^>]*\bcy="([0-9.]+)"[^>]*\brx="([0-9.]+)"[^>]*\bry="([0-9.]+)"[^>]*/?>""", RegexOption.IGNORE_CASE)
-    ellipse.findAll(svg).forEach { m ->
-        val x = m.groupValues[1].toFloat()
-        val y = m.groupValues[2].toFloat()
-        val rx = m.groupValues[3].toFloat()
-        val ry = m.groupValues[4].toFloat()
-        out += Item("ellipse", listOf(Offset(x - rx, y - ry), Offset(x + rx, y + ry)))
-    }
-    val poly = Regex("""<polyline\b[^>]*\bpoints="([^"]+)"[^>]*/?>""", RegexOption.IGNORE_CASE)
-    poly.findAll(svg).forEach { m ->
-        val pts = Regex("""(-?[0-9.]+),(-?[0-9.]+)""").findAll(m.groupValues[1])
-            .map { Offset(it.groupValues[1].toFloat(), it.groupValues[2].toFloat()) }.toList()
-        if (pts.size > 1) out += Item("freehand", pts)
-    }
-    if (out.isEmpty()) {
-        val document = SVG.getFromString(svg)
-        val picture = document.renderToPicture(1200, 1200)
-        val bitmap = Bitmap.createBitmap(1200, 1200, Bitmap.Config.ARGB_8888)
-        val canvas = NativeCanvas(bitmap)
-        canvas.drawColor(android.graphics.Color.WHITE)
-        canvas.drawPicture(picture)
-        out += Item("bitmap", listOf(Offset.Zero), bitmap = bitmap)
-    }
-    return out
+    require(svg.contains("<svg", ignoreCase = true)) { "The selected file is not a valid SVG document" }
+    val document = SVG.getFromString(svg)
+    val picture = document.renderToPicture(1600, 1200)
+    val bitmap = Bitmap.createBitmap(1600, 1200, Bitmap.Config.ARGB_8888)
+    val canvas = NativeCanvas(bitmap)
+    canvas.drawColor(android.graphics.Color.WHITE)
+    canvas.drawPicture(picture)
+    return listOf(Item("bitmap", listOf(Offset.Zero), bitmap = bitmap, name = "Imported SVG artwork"))
 }
+
 private fun exportPdf(items: List<Item>, uri: Uri, resolver: ContentResolver) {
     val doc = PdfDocument(); val info = PdfDocument.PageInfo.Builder(1200, 1200, 1).create()
     val page = doc.startPage(info); val canvas = page.canvas
