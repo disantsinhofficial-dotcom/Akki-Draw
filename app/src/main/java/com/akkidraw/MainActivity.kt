@@ -1,15 +1,28 @@
 package com.akkidraw
 
+import android.content.ContentResolver
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas as NativeCanvas
+import android.graphics.Paint
+import android.graphics.Path as NativePath
+import android.graphics.pdf.PdfDocument
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.*
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -19,152 +32,309 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
-private enum class DrawTool { SELECT, FREEHAND, RECTANGLE, ELLIPSE }
-private data class DrawStroke(val points: List<Offset>)
-private data class DrawShape(val type: DrawTool, val start: Offset, val end: Offset)
+private enum class Tool { SELECT, DRAW, RECT, ELLIPSE, LINE }
+private data class Item(
+    val type: String,
+    val points: List<Offset>,
+    val color: Long = 0xFF2563EB,
+    val stroke: Float = 4f,
+    val bitmap: Bitmap? = null
+) {
+    fun moved(delta: Offset) = copy(points = points.map { it + delta })
+}
+private data class Snapshot(val items: List<Item>, val selected: Int)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { AkkiDrawScreen() }
+        setContent { AkkiDrawScreen(contentResolver) }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AkkiDrawScreen() {
-    var tool by remember { mutableStateOf(DrawTool.FREEHAND) }
-    var strokes by remember { mutableStateOf(listOf<DrawStroke>()) }
-    var shapes by remember { mutableStateOf(listOf<DrawShape>()) }
-    var activePoints by remember { mutableStateOf(emptyList<Offset>()) }
-    var shapeStart by remember { mutableStateOf<Offset?>(null) }
-    var shapeEnd by remember { mutableStateOf<Offset?>(null) }
+private fun AkkiDrawScreen(resolver: ContentResolver) {
+    var items by remember { mutableStateOf(listOf<Item>()) }
+    var tool by remember { mutableStateOf(Tool.DRAW) }
+    var selected by remember { mutableIntStateOf(-1) }
     var zoom by remember { mutableFloatStateOf(1f) }
-    var status by remember { mutableStateOf("Ready to draw") }
+    var pan by remember { mutableStateOf(Offset.Zero) }
+    var active by remember { mutableStateOf<List<Offset>>(emptyList()) }
+    var history by remember { mutableStateOf(listOf<Snapshot>()) }
+    var future by remember { mutableStateOf(listOf<Snapshot>()) }
+    var status by remember { mutableStateOf("Ready · SVG editable objects · PDF page import") }
+    var showLayers by remember { mutableStateOf(false) }
+
+    fun checkpoint() {
+        history = history + Snapshot(items, selected)
+        if (history.size > 60) history = history.drop(1)
+        future = emptyList()
+    }
+    fun undo() {
+        if (history.isNotEmpty()) {
+            future = future + Snapshot(items, selected)
+            val s = history.last(); history = history.dropLast(1)
+            items = s.items; selected = s.selected
+        }
+    }
+    fun redo() {
+        if (future.isNotEmpty()) {
+            history = history + Snapshot(items, selected)
+            val s = future.last(); future = future.dropLast(1)
+            items = s.items; selected = s.selected
+        }
+    }
+
+    val saveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) runCatching { resolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(encodeProject(items)) }; status = "Project saved" }
+            .onFailure { status = "Save failed: ${it.message}" }
+    }
+    val svgLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/svg+xml")) { uri ->
+        if (uri != null) runCatching { resolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(exportSvg(items)) }; status = "SVG exported" }
+            .onFailure { status = "SVG export failed" }
+    }
+    val pdfLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+        if (uri != null) runCatching { exportPdf(items, uri, resolver); status = "PDF exported" }
+            .onFailure { status = "PDF export failed: ${it.message}" }
+    }
+    val openLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) runCatching {
+            val name = resolver.getType(uri).orEmpty()
+            val loaded = if (name.contains("svg") || uri.toString().endsWith(".svg", true)) importSvg(resolver.openInputStream(uri)!!.bufferedReader().readText())
+            else if (name.contains("pdf") || uri.toString().endsWith(".pdf", true)) listOf(importPdfPage(uri, resolver))
+            else decodeProject(resolver.openInputStream(uri)!!.bufferedReader().readText())
+            checkpoint(); items = loaded; selected = -1; status = "Imported ${loaded.size} object(s)"
+        }.onFailure { status = "Open failed: ${it.message}" }
+    }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF3157D5), background = Color(0xFFF3F5F9))) {
-        Scaffold(
-            topBar = {
-                TopAppBar(title = {
-                    Column {
-                        Text("Akki Draw", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                        Text("Vector studio · Phase 1", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Scaffold(topBar = {
+            TopAppBar(title = {
+                Column {
+                    Text("Akki Draw", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    Text("Vector studio · Phase 2 + 3", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }, actions = {
+                TextButton(onClick = { showLayers = !showLayers }) { Text("Layers") }
+            })
+        }, bottomBar = {
+            Surface(shadowElevation = 8.dp) {
+                Column {
+                    Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 4.dp, vertical = 5.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly) {
+                        Tool.entries.forEach { t -> TextButton(onClick = { tool = t }) { Text(if (tool == t) "● ${t.name}" else t.name) } }
                     }
-                })
-            },
-            bottomBar = {
-                Surface(shadowElevation = 8.dp) {
-                    Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                        ToolChip("Draw", tool == DrawTool.FREEHAND) { tool = DrawTool.FREEHAND }
-                        ToolChip("Rect", tool == DrawTool.RECTANGLE) { tool = DrawTool.RECTANGLE }
-                        ToolChip("Oval", tool == DrawTool.ELLIPSE) { tool = DrawTool.ELLIPSE }
-                        ToolChip("Select", tool == DrawTool.SELECT) { tool = DrawTool.SELECT }
-                        TextButton(onClick = {
-                            if (strokes.isNotEmpty()) strokes = strokes.dropLast(1)
-                            else if (shapes.isNotEmpty()) shapes = shapes.dropLast(1)
-                            status = "Undo"
-                        }) { Text("Undo") }
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        TextButton(onClick = { undo() }, enabled = history.isNotEmpty()) { Text("Undo") }
+                        TextButton(onClick = { redo() }, enabled = future.isNotEmpty()) { Text("Redo") }
+                        TextButton(onClick = { if (selected in items.indices) { checkpoint(); items = items.toMutableList().also { it.removeAt(selected) }; selected = -1 } }) { Text("Delete") }
+                        TextButton(onClick = { saveLauncher.launch("AkkiDraw-project.json") }) { Text("Save") }
                     }
                 }
             }
-        ) { insets ->
-            Column(Modifier.fillMaxSize().background(Color(0xFFF3F5F9)).padding(insets)) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text(status, fontSize = 12.sp, color = Color(0xFF626B7A))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = { zoom = (zoom / 1.2f).coerceAtLeast(.5f) }) { Text("−") }
-                        Text("${(zoom * 100).toInt()}%", fontSize = 12.sp)
-                        TextButton(onClick = { zoom = (zoom * 1.2f).coerceAtMost(4f) }) { Text("+") }
-                    }
+        }) { padding ->
+            Column(Modifier.fillMaxSize().padding(padding).background(Color(0xFFF3F5F9))) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(status, Modifier.weight(1f), fontSize = 11.sp, color = Color.DarkGray, maxLines = 1)
+                    TextButton(onClick = { zoom = (zoom / 1.25f).coerceIn(.25f, 8f) }) { Text("−") }
+                    Text("${(zoom * 100).toInt()}%", fontSize = 12.sp)
+                    TextButton(onClick = { zoom = (zoom * 1.25f).coerceIn(.25f, 8f) }) { Text("+") }
                 }
-                Box(Modifier.fillMaxSize().padding(12.dp).background(Color(0xFFE6EAF1), RoundedCornerShape(18.dp)).padding(10.dp)) {
-                    Canvas(Modifier.fillMaxSize().background(Color.White, RoundedCornerShape(8.dp))
-                        .pointerInput(tool) {
-                            detectDragGestures(
-                                onDragStart = { p ->
-                                    when (tool) {
-                                        DrawTool.FREEHAND -> activePoints = listOf(p)
-                                        DrawTool.RECTANGLE, DrawTool.ELLIPSE -> { shapeStart = p; shapeEnd = p }
-                                        else -> Unit
-                                    }
-                                },
-                                onDrag = { change, _ ->
-                                    when (tool) {
-                                        DrawTool.FREEHAND -> activePoints = activePoints + change.position
-                                        DrawTool.RECTANGLE, DrawTool.ELLIPSE -> shapeEnd = change.position
-                                        else -> Unit
-                                    }
-                                    change.consume()
-                                },
-                                onDragEnd = {
-                                    if (tool == DrawTool.FREEHAND && activePoints.size > 1) strokes = strokes + DrawStroke(activePoints)
-                                    if ((tool == DrawTool.RECTANGLE || tool == DrawTool.ELLIPSE) && shapeStart != null && shapeEnd != null)
-                                        shapes = shapes + DrawShape(tool, shapeStart!!, shapeEnd!!)
-                                    activePoints = emptyList()
-                                    shapeStart = null
-                                    shapeEnd = null
-                                    status = "Drawing added"
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    TextButton(onClick = { openLauncher.launch(arrayOf("image/svg+xml", "application/pdf", "application/json", "text/*")) }) { Text("Open SVG/PDF/Project") }
+                    TextButton(onClick = { svgLauncher.launch("AkkiDraw.svg") }) { Text("Export SVG") }
+                    TextButton(onClick = { pdfLauncher.launch("AkkiDraw.pdf") }) { Text("Export PDF") }
+                }
+                Row(Modifier.fillMaxSize().padding(10.dp)) {
+                    Box(Modifier.weight(1f).fillMaxHeight().background(Color.White)) {
+                        Canvas(Modifier.fillMaxSize()
+                            .pointerInput(zoom, pan, tool, items, selected) {
+                                detectTransformGestures { centroid, panChange, zoomChange, _ ->
+                                    val next = (zoom * zoomChange).coerceIn(.25f, 8f)
+                                    pan += panChange
+                                    zoom = next
                                 }
-                            )
+                            }
+                            .pointerInput(tool, zoom, pan, items, selected) {
+                                detectDragGestures(
+                                    onDragStart = { p ->
+                                        val doc = (p - pan) / zoom
+                                        when (tool) {
+                                            Tool.DRAW, Tool.LINE, Tool.RECT, Tool.ELLIPSE -> active = listOf(doc)
+                                            Tool.SELECT -> {
+                                                val hit = items.indexOfLast { hitTest(it, doc) }
+                                                selected = hit
+                                            }
+                                        }
+                                    },
+                                    onDrag = { change, delta ->
+                                        val docDelta = delta / zoom
+                                        when (tool) {
+                                            Tool.DRAW, Tool.LINE, Tool.RECT, Tool.ELLIPSE -> active = active + ((change.position - pan) / zoom)
+                                            Tool.SELECT -> if (selected in items.indices) {
+                                                checkpoint()
+                                                items = items.toMutableList().also { it[selected] = it[selected].moved(docDelta) }
+                                            }
+                                        }
+                                        change.consume()
+                                    },
+                                    onDragEnd = {
+                                        if (active.size > 1) {
+                                            checkpoint()
+                                            val type = when (tool) { Tool.DRAW -> "freehand"; Tool.RECT -> "rect"; Tool.ELLIPSE -> "ellipse"; Tool.LINE -> "line"; else -> "freehand" }
+                                            items = items + Item(type, active)
+                                            selected = items.lastIndex
+                                        }
+                                        active = emptyList()
+                                    }
+                                )
+                            }
+                        ) {
+                            drawContext.transform.translate(pan.x, pan.y)
+                            drawContext.transform.scale(zoom, zoom, Offset.Zero)
+                            items.forEachIndexed { index, item ->
+                                drawItem(item, if (index == selected) Color(0xFFEF4444) else Color(item.color))
+                            }
+                            if (active.size > 1) {
+                                val preview = Item(when (tool) { Tool.RECT -> "rect"; Tool.ELLIPSE -> "ellipse"; Tool.LINE -> "line"; else -> "freehand" }, active)
+                                drawItem(preview, Color(0xFF2563EB))
+                            }
+                            drawContext.transform.scale(1f / zoom, 1f / zoom, Offset.Zero)
+                            drawContext.transform.translate(-pan.x, -pan.y)
                         }
-                    ) {
-                        strokes.forEach { s ->
-                            if (s.points.size > 1) {
-                                val path = Path().apply {
-                                    moveTo(s.points.first().x, s.points.first().y)
-                                    s.points.drop(1).forEach { lineTo(it.x, it.y) }
+                        if (items.isEmpty()) Text("Choose a tool and draw", Modifier.align(Alignment.Center), color = Color.LightGray)
+                    }
+                    if (showLayers) {
+                        LazyColumn(Modifier.width(112.dp).fillMaxHeight().background(Color(0xFFF0F2F6)).padding(4.dp)) {
+                            itemsIndexed(items.reversed()) { reverseIndex, item ->
+                                val index = items.lastIndex - reverseIndex
+                                TextButton(onClick = { selected = index }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("${if (selected == index) "● " else ""}${item.type} ${index + 1}", fontSize = 10.sp)
                                 }
-                                drawPath(path, Color(0xFF2563EB), style = Stroke(5f, cap = StrokeCap.Round))
                             }
-                        }
-                        shapes.forEach { drawItem ->
-                            val l = minOf(drawItem.start.x, drawItem.end.x)
-                            val t = minOf(drawItem.start.y, drawItem.end.y)
-                            val sz = Size(max(1f, abs(drawItem.end.x - drawItem.start.x)), max(1f, abs(drawItem.end.y - drawItem.start.y)))
-                            if (drawItem.type == DrawTool.RECTANGLE) drawRect(Color(0xFF2563EB), Offset(l, t), sz, style = Stroke(4f))
-                            else drawOval(Color(0xFF2563EB), Offset(l, t), sz, style = Stroke(4f))
-                        }
-                        if (activePoints.size > 1) {
-                            val path = Path().apply {
-                                moveTo(activePoints.first().x, activePoints.first().y)
-                                activePoints.drop(1).forEach { lineTo(it.x, it.y) }
-                            }
-                            drawPath(path, Color(0xFF2563EB), style = Stroke(5f, cap = StrokeCap.Round))
-                        }
-                        val a = shapeStart
-                        val b = shapeEnd
-                        if (a != null && b != null) {
-                            val l = minOf(a.x, b.x); val t = minOf(a.y, b.y)
-                            val sz = Size(max(1f, abs(b.x - a.x)), max(1f, abs(b.y - a.y)))
-                            if (tool == DrawTool.RECTANGLE) drawRect(Color(0xFF2563EB), Offset(l, t), sz, style = Stroke(4f))
-                            else drawOval(Color(0xFF2563EB), Offset(l, t), sz, style = Stroke(4f))
                         }
                     }
-                    if (strokes.isEmpty() && shapes.isEmpty() && activePoints.isEmpty())
-                        Text("Choose a tool below and start drawing", Modifier.align(Alignment.Center).padding(24.dp),
-                            color = Color(0xFF9AA3B2), fontSize = 14.sp)
                 }
             }
         }
     }
 }
 
-@Composable
-private fun ToolChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    FilledTonalButton(onClick = onClick, shape = RoundedCornerShape(12.dp),
-        colors = ButtonDefaults.filledTonalButtonColors(
-            containerColor = if (selected) Color(0xFFDCE5FF) else Color(0xFFF1F3F7),
-            contentColor = if (selected) Color(0xFF2449C5) else Color(0xFF333B49)
-        ), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
-        Text(label, fontSize = 12.sp)
+private fun DrawScope.drawItem(item: Item, color: Color) {
+    if (item.type == "bitmap" && item.bitmap != null) {
+        drawImage(item.bitmap.asImageBitmap(), topLeft = item.points.firstOrNull() ?: Offset.Zero)
+        return
     }
+    if (item.points.isEmpty()) return
+    val p = item.points
+    val left = p.minOf { it.x }; val top = p.minOf { it.y }
+    val width = max(1f, p.maxOf { it.x } - left); val height = max(1f, p.maxOf { it.y } - top)
+    when (item.type) {
+        "rect" -> drawRect(color, Offset(left, top), Size(width, height), style = Stroke(item.stroke))
+        "ellipse" -> drawOval(color, Offset(left, top), Size(width, height), style = Stroke(item.stroke))
+        "line" -> drawLine(color, p.first(), p.last(), item.stroke)
+        "bitmap" -> Unit
+        else -> {
+            val path = Path().apply { moveTo(p.first().x, p.first().y); p.drop(1).forEach { lineTo(it.x, it.y) } }
+            drawPath(path, color, style = Stroke(item.stroke, cap = StrokeCap.Round))
+        }
+    }
+}
+private fun hitTest(item: Item, p: Offset): Boolean {
+    if (item.points.isEmpty()) return false
+    val l = item.points.minOf { it.x } - 18; val r = item.points.maxOf { it.x } + 18
+    val t = item.points.minOf { it.y } - 18; val b = item.points.maxOf { it.y } + 18
+    return p.x in l..r && p.y in t..b
+}
+private fun encodeProject(items: List<Item>): String = JSONObject().put("version", 2).put("items", JSONArray().apply {
+    items.forEach { item ->
+        put(JSONObject().put("type", item.type).put("color", item.color).put("stroke", item.stroke).put("points", JSONArray().apply {
+            item.points.forEach { put(JSONArray().put(it.x).put(it.y)) }
+        }))
+    }
+}).toString()
+private fun decodeProject(json: String): List<Item> {
+    val arr = JSONObject(json).getJSONArray("items")
+    return (0 until arr.length()).map { i ->
+        val o = arr.getJSONObject(i); val pts = o.getJSONArray("points")
+        Item(o.getString("type"), (0 until pts.length()).map { j -> val xy = pts.getJSONArray(j); Offset(xy.getDouble(0).toFloat(), xy.getDouble(1).toFloat()) },
+            o.optLong("color", 0xFF2563EB), o.optDouble("stroke", 4.0).toFloat())
+    }
+}
+private fun exportSvg(items: List<Item>): String {
+    val body = items.joinToString("\n") { item ->
+        if (item.points.isEmpty()) "" else {
+            val p = item.points; val l = p.minOf { it.x }; val t = p.minOf { it.y }
+            val w = max(1f, p.maxOf { it.x } - l); val h = max(1f, p.maxOf { it.y } - t)
+            val color = "#%06X".format(item.color and 0xFFFFFF)
+            when (item.type) {
+                "rect" -> "<rect x=\"$l\" y=\"$t\" width=\"$w\" height=\"$h\" fill=\"none\" stroke=\"$color\" stroke-width=\" ${item.stroke}\"/>"
+                "ellipse" -> "<ellipse cx=\"${l+w/2}\" cy=\"${t+h/2}\" rx=\"${w/2}\" ry=\"${h/2}\" fill=\"none\" stroke=\"$color\" stroke-width=\"${item.stroke}\"/>"
+                "line" -> "<line x1=\"${p.first().x}\" y1=\"${p.first().y}\" x2=\"${p.last().x}\" y2=\"${p.last().y}\" stroke=\"$color\" stroke-width=\"${item.stroke}\"/>"
+                else -> "<polyline points=\"${p.joinToString(" ") { "${it.x},${it.y}" }}\" fill=\"none\" stroke=\"$color\" stroke-width=\"${item.stroke}\" stroke-linecap=\"round\"/>"
+            }
+        }
+    }
+    return """<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">$body</svg>"""
+}
+private fun importSvg(svg: String): List<Item> {
+    val out = mutableListOf<Item>()
+    val rect = Regex("<rect[^>]*x=\"([\d.]+)\"[^>]*y=\"([\d.]+)\"[^>]*width=\"([\d.]+)\"[^>]*height=\"([\d.]+)\"[^>]*", RegexOption.IGNORE_CASE)
+    rect.findAll(svg).forEach { m ->
+        val x=m.groupValues[1].toFloat(); val y=m.groupValues[2].toFloat(); val w=m.groupValues[3].toFloat(); val h=m.groupValues[4].toFloat()
+        out += Item("rect", listOf(Offset(x,y), Offset(x+w,y+h)))
+    }
+    val ellipse = Regex("<ellipse[^>]*cx=\"([\d.]+)\"[^>]*cy=\"([\d.]+)\"[^>]*rx=\"([\d.]+)\"[^>]*ry=\"([\d.]+)\"[^>]*", RegexOption.IGNORE_CASE)
+    ellipse.findAll(svg).forEach { m ->
+        val x=m.groupValues[1].toFloat(); val y=m.groupValues[2].toFloat(); val rx=m.groupValues[3].toFloat(); val ry=m.groupValues[4].toFloat()
+        out += Item("ellipse", listOf(Offset(x-rx,y-ry), Offset(x+rx,y+ry)))
+    }
+    val poly = Regex("<polyline[^>]*points=\"([^\"]+)\"[^>]*", RegexOption.IGNORE_CASE)
+    poly.findAll(svg).forEach { m ->
+        val pts = Regex("([\d.]+),([\d.]+)").findAll(m.groupValues[1]).map { Offset(it.groupValues[1].toFloat(),it.groupValues[2].toFloat()) }.toList()
+        if (pts.size > 1) out += Item("freehand", pts)
+    }
+    return out
+}
+private fun exportPdf(items: List<Item>, uri: Uri, resolver: ContentResolver) {
+    val doc = PdfDocument(); val info = PdfDocument.PageInfo.Builder(1200, 1200, 1).create()
+    val page = doc.startPage(info); val canvas = page.canvas
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.BLUE; style = Paint.Style.STROKE; strokeWidth = 4f }
+    items.forEach { item ->
+        val p=item.points
+        if (p.size >= 2) {
+            val l=p.minOf { it.x }; val t=p.minOf { it.y }; val w=max(1f,p.maxOf { it.x }-l); val h=max(1f,p.maxOf { it.y }-t)
+            when(item.type) {
+                "rect" -> canvas.drawRect(l,t,l+w,t+h,paint)
+                "ellipse" -> canvas.drawOval(l,t,l+w,t+h,paint)
+                "line" -> canvas.drawLine(p.first().x,p.first().y,p.last().x,p.last().y,paint)
+                else -> { val path=NativePath(); path.moveTo(p.first().x,p.first().y); p.drop(1).forEach { path.lineTo(it.x,it.y) }; canvas.drawPath(path,paint) }
+            }
+        }
+    }
+    doc.finishPage(page); resolver.openOutputStream(uri)?.use { doc.writeTo(it) }; doc.close()
+}
+private fun importPdfPage(uri: Uri, resolver: ContentResolver): Item {
+    val pfd = resolver.openFileDescriptor(uri, "r") ?: error("Cannot open PDF")
+    val renderer = PdfRenderer(pfd)
+    require(renderer.pageCount > 0) { "PDF has no pages" }
+    val page = renderer.openPage(0)
+    val bitmap = Bitmap.createBitmap(page.width.coerceAtMost(1800), page.height.coerceAtMost(1800), Bitmap.Config.ARGB_8888)
+    val canvas = NativeCanvas(bitmap); canvas.drawColor(android.graphics.Color.WHITE)
+    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+    page.close(); renderer.close(); pfd.close()
+    return Item("bitmap", listOf(Offset.Zero), bitmap = bitmap)
 }
