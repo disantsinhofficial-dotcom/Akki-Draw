@@ -147,33 +147,21 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF8B9CFF), secondary = Color(0xFF63D6C5), background = Color(0xFF111318), surface = Color(0xFF1B1E25))) {
         Scaffold(topBar = {
             TopAppBar(title = {
-                Column {
-                    Text("Akki Draw", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    Text("Vector studio · Advanced editing + Export", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    Text("AKKI DRAW", fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, letterSpacing = 1.5.sp)
+                    Text("VECTOR DESIGN STUDIO", fontSize = 9.sp, letterSpacing = 1.8.sp, color = MaterialTheme.colorScheme.secondary)
                 }
             }, actions = {
+                TextButton(onClick = { undo() }, enabled = history.isNotEmpty()) { Text("Undo") }
+                TextButton(onClick = { redo() }, enabled = future.isNotEmpty()) { Text("Redo") }
+                TextButton(onClick = { saveLauncher.launch("AkkiDraw-project.json") }) { Text("Save") }
                 TextButton(onClick = { showLayers = !showLayers }) { Text("Layers") }
             })
-        }, bottomBar = {
-            Surface(shadowElevation = 8.dp) {
-                Column {
-                    Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 4.dp, vertical = 5.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly) {
-                        Tool.entries.forEach { t -> TextButton(onClick = { tool = t }) { Text(if (tool == t) "● ${t.name}" else t.name, fontSize = 10.sp) } }
-                    }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        TextButton(onClick = { undo() }, enabled = history.isNotEmpty()) { Text("Undo") }
-                        TextButton(onClick = { redo() }, enabled = future.isNotEmpty()) { Text("Redo") }
-                        TextButton(onClick = { if (selected in items.indices) { checkpoint(); items = items.toMutableList().also { it.removeAt(selected) }; selected = -1 } }) { Text("Delete") }
-                        TextButton(onClick = { saveLauncher.launch("AkkiDraw-project.json") }) { Text("Save") }
-                        TextButton(onClick = { showStyle = !showStyle }, enabled = selected in items.indices) { Text("Style") }
-                    }
-                }
-            }
         }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).background(Color(0xFF111318))) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(status, Modifier.weight(1f), fontSize = 11.sp, color = Color(0xFFB8C0D4), maxLines = 1)
+                Row(Modifier.fillMaxWidth().background(Color(0xFF20242D)).padding(horizontal = 10.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("FILE   EDIT   VIEW   OBJECT   ARRANGE", Modifier.weight(1f), fontSize = 10.sp, color = Color(0xFFD7DDF0), fontWeight = FontWeight.SemiBold)
+                    Text(status, fontSize = 10.sp, color = Color(0xFF9EA8BE), maxLines = 1)
                     TextButton(onClick = { zoom = (zoom / 1.25f).coerceIn(.25f, 8f) }) { Text("−") }
                     Text("${(zoom * 100).toInt()}%", fontSize = 12.sp)
                     TextButton(onClick = { zoom = (zoom * 1.25f).coerceIn(.25f, 8f) }) { Text("+") }
@@ -200,7 +188,16 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         TextButton(onClick = { if (selected < items.lastIndex) { checkpoint(); items = items.toMutableList().also { val v = it.removeAt(selected); it.add(selected + 1, v) }; selected++ } }, enabled = selected < items.lastIndex) { Text("Down") }
                     }
                 }
-                Row(Modifier.fillMaxSize().padding(10.dp)) {
+                Row(Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp)) {
+                    Column(Modifier.width(58.dp).fillMaxHeight().background(Color(0xFF20242D)), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Tool.entries.forEach { t ->
+                            val activeTool = tool == t
+                            TextButton(onClick = { tool = t }, modifier = Modifier.fillMaxWidth().height(48.dp), contentPadding = PaddingValues(2.dp)) {
+                                Text((if (activeTool) "▣\\n" else "") + when(t) { Tool.SELECT -> "Pick"; Tool.NODE -> "Node"; Tool.PEN -> "Pen"; Tool.DRAW -> "Free"; Tool.RECT -> "Rect"; Tool.ELLIPSE -> "Oval"; Tool.LINE -> "Line" }, fontSize = 10.sp, lineHeight = 12.sp, color = if(activeTool) Color(0xFF8B9CFF) else Color(0xFFD7DDF0))
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
                     Box(Modifier.weight(1f).fillMaxHeight().background(Color.White)) {
                         Canvas(Modifier.fillMaxSize()
                             .pointerInput(zoom, pan, tool, items, selected) {
@@ -279,7 +276,8 @@ private fun AkkiDrawScreen(resolver: ContentResolver) {
                         if (items.isEmpty()) Text("Choose a tool and draw", Modifier.align(Alignment.Center), color = Color.LightGray)
                     }
                     if (showLayers) {
-                        LazyColumn(Modifier.width(112.dp).fillMaxHeight().background(Color(0xFF20242D)).padding(4.dp)) {
+                        LazyColumn(Modifier.width(132.dp).fillMaxHeight().background(Color(0xFF20242D)).padding(4.dp)) {
+                            item { Text("OBJECTS", Modifier.padding(6.dp), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9EA8BE)) }
                             itemsIndexed(items.reversed()) { reverseIndex, item ->
                                 val index = items.lastIndex - reverseIndex
                                 TextButton(onClick = { selected = index }, modifier = Modifier.fillMaxWidth()) {
